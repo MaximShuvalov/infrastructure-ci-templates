@@ -62,7 +62,7 @@ jobs:
           
           echo "Merging $COUNT SARIF files manually..."
           
-          # Извлекаем runs из всех файлов и объединяем в один массив
+          # Объединяем runs и добавляем УНИКАЛЬНУЮ категорию для каждого run
           jq -s '
             {
               "$schema": .[0]."$schema",
@@ -71,14 +71,14 @@ jobs:
                 .[].runs[] | 
                 . + {
                   "properties": {
-                    "category": "static-analysis"
+                    "category": ("static-analysis-" + (. | tostring | split("") | map(if . == "/" then "_" else . end) | join("") | .[0:50]))
                   }
                 }
               ]
             }
           ' "${FILES[@]}" > merged.sarif
           
-          echo "Merged $COUNT SARIF files into merged.sarif"
+          echo "Merged $COUNT SARIF files into merged.sarif with unique categories"
 
       - name: Upload Merged SARIF to GitHub Code Scanning
         if: always() && steps.find_sarif.outputs.count > 0
