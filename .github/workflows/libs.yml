@@ -54,49 +54,37 @@ jobs:
           printf '%s\n' "${FILES[@]}" > sarif_files.txt
           echo "Found ${#FILES[@]} SARIF files"
 
-      - name: Download CodeQL CLI
-        if: always() && steps.find_sarif.outputs.count > 0
-        run: |
-          curl -L https://github.com/github/codeql-cli-binaries/releases/latest/download/codeql-linux64.zip -o codeql.zip
-          unzip -q codeql.zip
-          chmod +x codeql/codeql
-
-      - name: Merge SARIF files
+      - name: Merge SARIF files manually
         if: always() && steps.find_sarif.outputs.count > 0
         run: |
           mapfile -t FILES < <(cat sarif_files.txt)
           COUNT=${#FILES[@]}
           
-          echo "Merging $COUNT SARIF files..."
+          echo "Merging $COUNT SARIF files manually..."
           
-          if [ "$COUNT" -eq 1 ]; then
-            cp "${FILES[0]}" merged.sarif
-          else
-            # Первый файл — база
-            cp "${FILES[0]}" merged.sarif
+          # Извлекаем runs из всех файлов и объединяем в один массив
+          jq -s '
+            {
+              "$schema": .[0]."$schema",
+              "version": .[0].version,
+              "runs": [
+                .[].runs[] | 
+                . + {
+                  "properties": {
+                    "category": "static-analysis"
+                  }
+                }
+              ]
+            }
+          ' "${FILES[@]}" > merged.sarif
           
-            # Последовательно мержим каждый следующий файл
-            for (( i=1; i<COUNT; i++ )); do
-              echo "Merging with: ${FILES[$i]}"
-              ./codeql/codeql github merge-results \
-                --sarif=merged.sarif \
-                --sarif="${FILES[$i]}" \
-                --output=merged.sarif.tmp
-              mv merged.sarif.tmp merged.sarif
-            done
-          fi
-          
-          # Добавляем уникальные категории для каждого run
-          jq '[.runs | to_entries[] | .value + { "properties": { "category": ("run-" + (.key | tostring)) } }]' \
-            merged.sarif > merged.sarif.fixed
-          
-          echo "Merged and categorized $COUNT SARIF files"
+          echo "Merged $COUNT SARIF files into merged.sarif"
 
       - name: Upload Merged SARIF to GitHub Code Scanning
         if: always() && steps.find_sarif.outputs.count > 0
         uses: github/codeql-action/upload-sarif@v4
         with:
-          sarif_file: merged.sarif.fixed
+          sarif_file: merged.sarif
           category: static-analysis
 
   publish:
