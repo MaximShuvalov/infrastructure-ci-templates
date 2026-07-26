@@ -60,6 +60,15 @@ jobs:
             echo "path=" >> $GITHUB_OUTPUT
           fi
 
+      - name: Sanitize SpotBugs SARIF
+        if: always() && steps.find_spotbugs.outputs.path != ''
+        id: sanitize_spotbugs
+        run: |
+          ORIGINAL_FILE="${{ steps.find_spotbugs.outputs.path }}"
+          FIXED_FILE="${ORIGINAL_FILE}.fixed.sarif"
+          jq 'del(.runs[0].taxonomies)' "$ORIGINAL_FILE" > "$FIXED_FILE"
+          echo "fixed_path=$FIXED_FILE" >> $GITHUB_OUTPUT
+
       - name: Upload SpotBugs SARIF to GitHub
         if: always() && steps.find_spotbugs.outputs.path != ''
         uses: github/codeql-action/upload-sarif@v4
