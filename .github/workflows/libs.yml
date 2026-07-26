@@ -54,31 +54,36 @@ jobs:
           printf '%s\n' "${FILES[@]}" > sarif_files.txt
           echo "Found ${#FILES[@]} SARIF files"
 
-      - name: Merge SARIF files manually
+      - name: Merge SARIF files with unique categories
         if: always() && steps.find_sarif.outputs.count > 0
         run: |
           mapfile -t FILES < <(cat sarif_files.txt)
           COUNT=${#FILES[@]}
           
-          echo "Merging $COUNT SARIF files manually..."
+          echo "Merging $COUNT SARIF files..."
           
-          # Объединяем runs и добавляем УНИКАЛЬНУЮ категорию для каждого run
-          jq -s '
+          # Создаем JSON-массив имен файлов для передачи в jq
+          FILES_JSON=$(printf '%s\n' "${FILES[@]}" | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          
+          # Объединяем все runs и назначаем уникальную категорию на основе имени файла
+          jq --argjson files "$FILES_JSON" '
+            [
+              range(0; length) as $i | 
+              .[$i].runs[] | 
+              . + {
+                "properties": {
+                  "category": ("run-" + ($files[$i] | gsub("[^a-zA-Z0-9]"; "-")))
+                }
+              }
+            ] as $all_runs |
             {
               "$schema": .[0]."$schema",
               "version": .[0].version,
-              "runs": [
-                .[].runs[] | 
-                . + {
-                  "properties": {
-                    "category": ("static-analysis-" + (. | tostring | split("") | map(if . == "/" then "_" else . end) | join("") | .[0:50]))
-                  }
-                }
-              ]
+              "runs": $all_runs
             }
           ' "${FILES[@]}" > merged.sarif
           
-          echo "Merged $COUNT SARIF files into merged.sarif with unique categories"
+          echo "Successfully merged $COUNT SARIF files with unique categories"
 
       - name: Upload Merged SARIF to GitHub Code Scanning
         if: always() && steps.find_sarif.outputs.count > 0
