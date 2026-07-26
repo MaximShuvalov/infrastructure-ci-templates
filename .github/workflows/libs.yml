@@ -49,28 +49,27 @@ jobs:
         with:
           sarif_file: ${{ steps.find_detekt.outputs.path }}
 
-      - name: Find SpotBugs SARIF
+      - name: Find and Sanitize SpotBugs SARIF
         id: find_spotbugs
         if: always()
         run: |
-          FILE=$(find . -type f -path "*/build/reports/spotbugs/main.sarif" | head -n 1)
-          if [ -n "$FILE" ]; then
-            echo "path=$FILE" >> $GITHUB_OUTPUT
-          else
+          FILES=$(find . -type f -path "*/build/reports/spotbugs/main.sarif")
+          
+          if [ -z "$FILES" ]; then
             echo "path=" >> $GITHUB_OUTPUT
+            echo "No SpotBugs SARIF files found"
+            exit 0
           fi
-
-      - name: Sanitize SpotBugs SARIF
-        if: always() && steps.find_spotbugs.outputs.path != ''
-        id: sanitize_spotbugs
-        run: |
-          ORIGINAL_FILE="${{ steps.find_spotbugs.outputs.path }}"
-          FIXED_FILE="${ORIGINAL_FILE}.fixed.sarif"
           
-          jq 'del(.runs[].taxonomies)' "$ORIGINAL_FILE" > "$FIXED_FILE"
+          while IFS= read -r FILE; do
+            echo "Sanitizing: $FILE"
+            jq 'del(.runs[].taxonomies)' "$FILE" > "${FILE}.tmp"
+            mv "${FILE}.tmp" "$FILE"
+          done <<< "$FILES"
           
-          echo "fixed_path=$FIXED_FILE" >> $GITHUB_OUTPUT
-          echo "✅ Sanitized SARIF saved to: $FIXED_FILE"
+          FIRST_FILE=$(echo "$FILES" | head -n 1)
+          echo "path=$FIRST_FILE" >> $GITHUB_OUTPUT
+          echo "Sanitized files: $FILES"
 
       - name: Upload SpotBugs SARIF to GitHub
         if: always() && steps.find_spotbugs.outputs.path != ''
