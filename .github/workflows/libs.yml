@@ -33,7 +33,7 @@ jobs:
       - name: Run Build and All Checks
         run: ./gradlew --no-daemon clean check
 
-      - name: Find and Sanitize SARIF files
+      - name: Find SARIF files
         id: find_sarif
         if: always()
         run: |
@@ -45,61 +45,53 @@ jobs:
             exit 0
           fi
           
-          for FILE in "${FILES[@]}"; do
-            echo "Sanitizing: $FILE"
-            jq 'del(.runs[].taxonomies)' "$FILE" > "${FILE}.tmp" && mv "${FILE}.tmp" "$FILE"
-          done
-          
           echo "count=${#FILES[@]}" >> $GITHUB_OUTPUT
           printf '%s\n' "${FILES[@]}" > sarif_files.txt
           echo "Found ${#FILES[@]} SARIF files"
 
-      - name: Merge SARIF files using Python
+      - name: Merge and Sanitize SARIF files with Node.js
         if: always() && steps.find_sarif.outputs.count > 0
         run: |
-          python3 << 'EOF'
-          import json
-          import sys
-          import os
+          node -e '
+          const fs = require("fs");
 
-          with open('sarif_files.txt', 'r') as f:
-              files = [line.strip() for line in f if line.strip()]
+          const filesContent = fs.readFileSync("sarif_files.txt", "utf8");
+          const files = filesContent.split("\n").filter(f => f.trim() !== "");
 
-          merged_runs = []
-          schema = "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json"
-          version = "2.1.0"
+          let merged = {
+            $schema: "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+            version: "2.1.0",
+            runs: []
+          };
 
-          for i, file_path in enumerate(files):
-              with open(file_path, 'r') as f:
-                  data = json.load(f)
+          files.forEach((file, index) => {
+            let data = JSON.parse(fs.readFileSync(file, "utf8"));
           
-              if "$schema" in data:
-                  schema = data["$schema"]
-              if "version" in data:
-                  version = data["version"]
+            const parts = file.replace("./", "").split("/");
+            const module = parts[0] || "root";
+            const tool = file.includes("detekt") ? "detekt" : "spotbugs";
+            const uniqueCategory = `${tool}-${module}-${index}`;
+
+            if (data.runs) {
+              data.runs.forEach((run) => {
+                // 1. Sanitize: удаляем битые поля taxonomies, из-за которых GitHub отклонял файл
+                if (run.taxonomies) delete run.taxonomies;
+                if (run.tool && run.tool.driver && run.tool.driver.taxonomies) {
+                  delete run.tool.driver.taxonomies;
+                }
           
-              parts = file_path.replace('./', '').split('/')
-              module_name = parts[0] if len(parts) > 1 else "unknown"
-              tool_name = "detekt" if "detekt" in file_path else "spotbugs"
-              unique_category = f"{tool_name}-{module_name}-{i}"
-
-              for run in data.get("runs", []):
-                  if "properties" not in run:
-                      run["properties"] = {}
-                  run["properties"]["category"] = unique_category
-                  merged_runs.append(run)
-
-          merged_sarif = {
-              "$schema": schema,
-              "version": version,
-              "runs": merged_runs
-          }
-
-          with open("merged.sarif", 'w') as f:
-              json.dump(merged_sarif, f, indent=2)
+                // 2. Assign unique category
+                if (!run.properties) run.properties = {};
+                run.properties.category = uniqueCategory;
           
-          print(f"Successfully merged {len(files)} SARIF files into merged.sarif")
-          EOF
+                merged.runs.push(run);
+              });
+            }
+          });
+
+          fs.writeFileSync("merged.sarif", JSON.stringify(merged, null, 2));
+          console.log(`Successfully merged and sanitized ${files.length} SARIF files.`);
+          '
 
       - name: Upload Merged SARIF to GitHub Code Scanning
         if: always() && steps.find_sarif.outputs.count > 0
