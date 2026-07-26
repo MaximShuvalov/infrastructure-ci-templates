@@ -54,35 +54,52 @@ jobs:
           printf '%s\n' "${FILES[@]}" > sarif_files.txt
           echo "Found ${#FILES[@]} SARIF files"
 
-      - name: Merge SARIF files with unique categories
+      - name: Merge SARIF files using Python
         if: always() && steps.find_sarif.outputs.count > 0
         run: |
-          mapfile -t FILES < <(cat sarif_files.txt)
-          COUNT=${#FILES[@]}
+          python3 << 'EOF'
+          import json
+          import sys
+          import os
+
+          with open('sarif_files.txt', 'r') as f:
+              files = [line.strip() for line in f if line.strip()]
+
+          merged_runs = []
+          schema = "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json"
+          version = "2.1.0"
+
+          for i, file_path in enumerate(files):
+              with open(file_path, 'r') as f:
+                  data = json.load(f)
           
-          echo "Merging $COUNT SARIF files..."
+              if "$schema" in data:
+                  schema = data["$schema"]
+              if "version" in data:
+                  version = data["version"]
           
-          FILES_JSON=$(printf '%s\n' "${FILES[@]}" | jq -R -s -c 'split("\n") | map(select(length > 0))')
+              parts = file_path.replace('./', '').split('/')
+              module_name = parts[0] if len(parts) > 1 else "unknown"
+              tool_name = "detekt" if "detekt" in file_path else "spotbugs"
+              unique_category = f"{tool_name}-{module_name}-{i}"
+
+              for run in data.get("runs", []):
+                  if "properties" not in run:
+                      run["properties"] = {}
+                  run["properties"]["category"] = unique_category
+                  merged_runs.append(run)
+
+          merged_sarif = {
+              "$schema": schema,
+              "version": version,
+              "runs": merged_runs
+          }
+
+          with open("merged.sarif", 'w') as f:
+              json.dump(merged_sarif, f, indent=2)
           
-          jq -s --argjson files "$FILES_JSON" '
-            {
-              "$schema": .[0]."$schema",
-              "version": .[0].version,
-              "runs": [
-                range(0; length) as $i |
-                .[$i].runs[] |
-                . + {
-                  "properties": (
-                    (.properties // {}) + {
-                      "category": "run-\($i)-\($files[$i] | gsub("[^a-zA-Z0-9]"; "-"))"
-                    }
-                  )
-                }
-              ]
-            }
-          ' "${FILES[@]}" > merged.sarif
-          
-          echo "Successfully merged $COUNT SARIF files"
+          print(f"Successfully merged {len(files)} SARIF files into merged.sarif")
+          EOF
 
       - name: Upload Merged SARIF to GitHub Code Scanning
         if: always() && steps.find_sarif.outputs.count > 0
