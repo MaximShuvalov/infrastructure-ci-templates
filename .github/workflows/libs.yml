@@ -66,7 +66,7 @@ jobs:
         run: |
           ORIGINAL_FILE="${{ steps.find_spotbugs.outputs.path }}"
           FIXED_FILE="${ORIGINAL_FILE}.fixed.sarif"
-          jq 'del(.runs[0].taxonomies)' "$ORIGINAL_FILE" > "$FIXED_FILE"
+          jq '(.runs // []) |= map(del(.taxonomies))' "$ORIGINAL_FILE" > "$FIXED_FILE"
           echo "fixed_path=$FIXED_FILE" >> $GITHUB_OUTPUT
 
       - name: Upload SpotBugs SARIF to GitHub
