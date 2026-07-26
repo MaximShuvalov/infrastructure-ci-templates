@@ -1,29 +1,28 @@
-name: Build and Publish JVM Library
+name: Gradle Maven Publish Template
 
 on:
-  push:
-    tags:
-      - 'v*'
-  workflow_dispatch:
+  workflow_call:
+    inputs:
+      java-version:
+        description: 'Java version'
+        required: false
+        type: string
+        default: '21'
+    secrets:
+      PUBLISH_TOKEN:
+        required: true
 
 jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up JDK 21
-        uses: actions/setup-java@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
         with:
-          java-version: '21'
+          java-version: ${{ inputs.java-version }}
           distribution: 'temurin'
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: Run verification
-        run: ./gradlew --no-daemon clean check
+      - uses: gradle/actions/setup-gradle@v4
+      - run: ./gradlew --no-daemon clean check
 
   publish:
     runs-on: ubuntu-latest
@@ -31,40 +30,25 @@ jobs:
     permissions:
       contents: read
       packages: write
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up JDK 21
-        uses: actions/setup-java@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
         with:
-          java-version: '21'
+          java-version: ${{ inputs.java-version }}
           distribution: 'temurin'
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: Extract version from tag
-        id: version
-        run: |
-          if [[ "${{ github.ref_type }}" == "tag" ]]; then
-            VERSION="${{ github.ref_name }}"
-            echo "version=${VERSION#v}" >> $GITHUB_OUTPUT
-          else
-            echo "version=" >> $GITHUB_OUTPUT
-          fi
+      - uses: gradle/actions/setup-gradle@v4
 
       - name: Publish to GitHub Packages
         run: |
-          if [ -n "${{ steps.version.outputs.version }}" ]; then
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            VERSION="${{ github.ref_name }}"
             ./gradlew --no-daemon publish \
-              -Pversion="${{ steps.version.outputs.version }}" \
+              -Pversion="${VERSION#v}" \
               -PgithubMavenRepositoryUrl="https://maven.pkg.github.com/${{ github.repository }}"
           else
             ./gradlew --no-daemon publish \
               -PgithubMavenRepositoryUrl="https://maven.pkg.github.com/${{ github.repository }}"
           fi
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}
