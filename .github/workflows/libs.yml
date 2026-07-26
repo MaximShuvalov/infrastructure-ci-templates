@@ -65,15 +65,18 @@ jobs:
           # Создаем JSON-массив имен файлов для передачи в jq
           FILES_JSON=$(printf '%s\n' "${FILES[@]}" | jq -R -s -c 'split("\n") | map(select(length > 0))')
           
-          # Объединяем все runs и назначаем уникальную категорию на основе имени файла
-          jq --argjson files "$FILES_JSON" '
+          # -s (slurp) критически важен: он превращает входные файлы в массив [File1, File2, ...]
+          jq -s --argjson files "$FILES_JSON" '
             [
-              range(0; length) as $i | 
-              .[$i].runs[] | 
+              range(0; length) as $i |
+              .[$i].runs[] |
               . + {
-                "properties": {
-                  "category": ("run-" + ($files[$i] | gsub("[^a-zA-Z0-9]"; "-")))
-                }
+                "properties": (
+                  .properties // {} | 
+                  . + {
+                    "category": ("run-" + ($files[$i] | gsub("[^a-zA-Z0-9]"; "-")))
+                  }
+                )
               }
             ] as $all_runs |
             {
