@@ -18,7 +18,7 @@ jobs:
     permissions:
       contents: read
       packages: write
-      security-events: write
+      security-events: write # Это единственное обязательное разрешение для Code Scanning
 
     steps:
       - uses: actions/checkout@v4
@@ -33,77 +33,52 @@ jobs:
       - name: Run Build and All Checks
         run: ./gradlew --no-daemon clean check
 
-      - name: Find SARIF files
-        id: find_sarif
+      - name: Find and Prepare SARIF Files
+        id: process_sarif
         if: always()
         run: |
-          mapfile -t FILES < <(find . -type f \( -path "*/build/reports/detekt/detekt.sarif" -o -path "*/build/reports/spotbugs/main.sarif" \))
+          # Находим файлы и копируем их в структуру, удобную для загрузки
+          mkdir -p sarif-artifacts
           
-          if [ ${#FILES[@]} -eq 0 ]; then
-            echo "No SARIF files found"
-            echo "count=0" >> $GITHUB_OUTPUT
-            exit 0
-          fi
+          # Счетчик найденных файлов
+          count=0
           
-          echo "count=${#FILES[@]}" >> $GITHUB_OUTPUT
-          printf '%s\n' "${FILES[@]}" > sarif_files.txt
-          echo "Found ${#FILES[@]} SARIF files"
-
-      - name: Merge and Sanitize SARIF files with Node.js
-        if: always() && steps.find_sarif.outputs.count > 0
-        run: |
-          node -e '
-          const fs = require("fs");
-
-          const filesContent = fs.readFileSync("sarif_files.txt", "utf8");
-          const files = filesContent.split("\n").filter(f => f.trim() !== "");
-
-          let merged = {
-            $schema: "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
-            version: "2.1.0",
-            runs: []
-          };
-
-          files.forEach((file, index) => {
-            let data = JSON.parse(fs.readFileSync(file, "utf8"));
+          # Ищем отчеты detekt и spotbugs
+          while read -r file; do
+            if [ -f "$file" ]; then
+              # Определяем модуль и инструмент
+              MODULE=$(echo "$file" | awk -F'/build/reports/' '{print $1}' | sed 's|^\./||' | tr '/' '-')
+              if [ -z "$MODULE" ]; then MODULE="root"; fi
           
-            const parts = file.replace("./", "").split("/");
-            const module = parts[0] || "root";
-            const tool = file.includes("detekt") ? "detekt" : "spotbugs";
-            const uniqueCategory = `${tool}-${module}-${index}`;
-
-            if (data.runs) {
-              data.runs.forEach((run) => {
-                if (run.taxonomies) delete run.taxonomies;
-                if (run.tool && run.tool.driver && run.tool.driver.taxonomies) {
-                  delete run.tool.driver.taxonomies;
-                }
+              TOOL="spotbugs"
+              if [[ "$file" == *"detekt"* ]]; then TOOL="detekt"; fi
           
-                if (!run.properties) run.properties = {};
-                run.properties.category = uniqueCategory;
+              # Формируем плоское имя файла, кодируя в него модуль и категорию
+              # Формат: категория__модуль__имя.sarif
+              NEW_NAME="${TOOL}__${MODULE}__report.sarif"
+              cp "$file" "sarif-artifacts/$NEW_NAME"
+              count=$((count+1))
+            fi
+          done < <(find . -type f \( -path "*/build/reports/detekt/detekt.sarif" -o -path "*/build/reports/spotbugs/main.sarif" \))
           
-                merged.runs.push(run);
-              });
-            }
-          });
+          echo "Found and prepared $count SARIF files."
+          echo "count=$count" >> $GITHUB_OUTPUT
 
-          fs.writeFileSync("merged.sarif", JSON.stringify(merged, null, 2));
-          console.log("Successfully merged and sanitized " + files.length + " SARIF files.");
-          '
-
-      - name: Save Merged SARIF as Artifact
-        if: always() && steps.find_sarif.outputs.count > 0
-        uses: actions/upload-artifact@v4
+      - name: Upload Detekt SARIF Reports
+        if: always() && steps.process_sarif.outputs.count > 0
+        uses: github/codeql-action/upload-sarif@v3
+        continue-on-error: true # Предотвращает падение джобы, если один из модулей пустой
         with:
-          name: merged-sarif-debug
-          path: merged.sarif
-          retention-days: 1
+          sarif_file: 'sarif-artifacts/detekt__*__report.sarif'
+          category: 'detekt'
 
-      - name: Upload Merged SARIF to GitHub Code Scanning
-        if: always() && steps.find_sarif.outputs.count > 0
-        uses: github/codeql-action/upload-sarif@v4
+      - name: Upload SpotBugs SARIF Reports
+        if: always() && steps.process_sarif.outputs.count > 0
+        uses: github/codeql-action/upload-sarif@v3
+        continue-on-error: true
         with:
-          sarif_file: merged.sarif
+          sarif_file: 'sarif-artifacts/spotbugs__*__report.sarif'
+          category: 'spotbugs'
 
   publish:
     runs-on: ubuntu-latest
@@ -128,7 +103,7 @@ jobs:
           VERSION="${{ github.ref_name }}"
           ./gradlew --no-daemon publish \
             -Pversion="${VERSION#v}" \
-            -PgithubMavenRepositoryUrl="https://maven.pkg.github.com/${{ github.repository }}"
+            -PgithubMavenRepositoryUrl="https://github.com{{ github.repository }}"
         env:
           GITHUB_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}
