@@ -18,7 +18,7 @@ jobs:
     permissions:
       contents: read
       packages: write
-      security-events: write # Минимальное и единственное разрешение для Code Scanning
+      security-events: write
 
     steps:
       - uses: actions/checkout@v4
@@ -33,42 +33,41 @@ jobs:
       - name: Run Build and All Checks
         run: ./gradlew --no-daemon clean check
 
-      - name: Upload SARIF Reports directly via GitHub CLI
+      - name: Collect and Rename SARIF Files
+        id: collect_sarif
         if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          # Ищем все сгенерированные SARIF отчеты
-          FILES=$(find . -type f \( -path "*/build/reports/detekt/detekt.sarif" -o -path "*/build/reports/spotbugs/main.sarif" \))
+          # Создаем чистую директорию для результатов
+          mkdir -p sarif-results
           
-          if [ -z "$FILES" ]; then
-            echo "No SARIF files found."
-            exit 0
-          fi
-
-          # Построчно обрабатываем каждый файл
-          echo "$FILES" | while read -r file; do
+          count=0
+          
+          # Находим все файлы и копируем их с плоскими уникальными именами
+          while read -r file; do
             if [ -f "$file" ]; then
-              # Извлекаем имя модуля (например, :core или :app). Если корень, то "root"
+              # Извлекаем имя модуля
               MODULE=$(echo "$file" | awk -F'/build/reports/' '{print $1}' | sed 's|^\./||' | tr '/' '-')
               if [ -z "$MODULE" ]; then MODULE="root"; fi
           
-              # Определяем инструмент для категории
+              # Определяем инструмент
               TOOL="spotbugs"
               if [[ "$file" == *"detekt"* ]]; then TOOL="detekt"; fi
           
-              # Формируем уникальную категорию: инструмент + модуль
-              CATEGORY="${TOOL}-${MODULE}"
-              echo "Uploading $file to Code Scanning with category: $CATEGORY"
-          
-              # Загружаем напрямую через встроенный в раннер CLI, минуя баги с масками в экшенах
-              gh code-scanning upload-sarif \
-                --sarif-file="$file" \
-                --commit="${{ github.sha }}" \
-                --ref="${{ github.ref }}" \
-                --category="$CATEGORY"
+              # Формируем уникальное имя файла, чтобы избежать перезаписи в одной папке
+              cp "$file" "sarif-results/${MODULE}-${TOOL}.sarif"
+              count=$((count+1))
             fi
-          done
+          done < <(find . -type f \( -path "*/build/reports/detekt/detekt.sarif" -o -path "*/build/reports/spotbugs/main.sarif" \))
+          
+          echo "Prepared $count SARIF files for upload."
+          echo "count=$count" >> $GITHUB_OUTPUT
+
+      - name: Upload SARIF Directory to GitHub Code Scanning
+        if: always() && steps.collect_sarif.outputs.count > 0
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          # Передаем путь к директории, а не маску файла. Это предотвратит ошибку Path does not exist
+          sarif_file: 'sarif-results'
 
   publish:
     runs-on: ubuntu-latest
