@@ -74,13 +74,11 @@ jobs:
 
             if (data.runs) {
               data.runs.forEach((run) => {
-                // 1. Sanitize: удаляем битые поля taxonomies, из-за которых GitHub отклонял файл
                 if (run.taxonomies) delete run.taxonomies;
                 if (run.tool && run.tool.driver && run.tool.driver.taxonomies) {
                   delete run.tool.driver.taxonomies;
                 }
           
-                // 2. Assign unique category
                 if (!run.properties) run.properties = {};
                 run.properties.category = uniqueCategory;
           
@@ -90,8 +88,16 @@ jobs:
           });
 
           fs.writeFileSync("merged.sarif", JSON.stringify(merged, null, 2));
-          console.log(`Successfully merged and sanitized ${files.length} SARIF files.`);
+          console.log("Successfully merged and sanitized " + files.length + " SARIF files.");
           '
+
+      - name: Save Merged SARIF as Artifact
+        if: always() && steps.find_sarif.outputs.count > 0
+        uses: actions/upload-artifact@v4
+        with:
+          name: merged-sarif-debug
+          path: merged.sarif
+          retention-days: 1
 
       - name: Upload Merged SARIF to GitHub Code Scanning
         if: always() && steps.find_sarif.outputs.count > 0
