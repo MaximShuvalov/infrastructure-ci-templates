@@ -18,7 +18,7 @@ jobs:
     permissions:
       contents: read
       packages: write
-      security-events: write # Это единственное обязательное разрешение для Code Scanning
+      security-events: write # Минимальное и единственное разрешение для Code Scanning
 
     steps:
       - uses: actions/checkout@v4
@@ -33,52 +33,42 @@ jobs:
       - name: Run Build and All Checks
         run: ./gradlew --no-daemon clean check
 
-      - name: Find and Prepare SARIF Files
-        id: process_sarif
+      - name: Upload SARIF Reports directly via GitHub CLI
         if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          # Находим файлы и копируем их в структуру, удобную для загрузки
-          mkdir -p sarif-artifacts
+          # Ищем все сгенерированные SARIF отчеты
+          FILES=$(find . -type f \( -path "*/build/reports/detekt/detekt.sarif" -o -path "*/build/reports/spotbugs/main.sarif" \))
           
-          # Счетчик найденных файлов
-          count=0
-          
-          # Ищем отчеты detekt и spotbugs
-          while read -r file; do
+          if [ -z "$FILES" ]; then
+            echo "No SARIF files found."
+            exit 0
+          fi
+
+          # Построчно обрабатываем каждый файл
+          echo "$FILES" | while read -r file; do
             if [ -f "$file" ]; then
-              # Определяем модуль и инструмент
+              # Извлекаем имя модуля (например, :core или :app). Если корень, то "root"
               MODULE=$(echo "$file" | awk -F'/build/reports/' '{print $1}' | sed 's|^\./||' | tr '/' '-')
               if [ -z "$MODULE" ]; then MODULE="root"; fi
           
+              # Определяем инструмент для категории
               TOOL="spotbugs"
               if [[ "$file" == *"detekt"* ]]; then TOOL="detekt"; fi
           
-              # Формируем плоское имя файла, кодируя в него модуль и категорию
-              # Формат: категория__модуль__имя.sarif
-              NEW_NAME="${TOOL}__${MODULE}__report.sarif"
-              cp "$file" "sarif-artifacts/$NEW_NAME"
-              count=$((count+1))
-            fi
-          done < <(find . -type f \( -path "*/build/reports/detekt/detekt.sarif" -o -path "*/build/reports/spotbugs/main.sarif" \))
+              # Формируем уникальную категорию: инструмент + модуль
+              CATEGORY="${TOOL}-${MODULE}"
+              echo "Uploading $file to Code Scanning with category: $CATEGORY"
           
-          echo "Found and prepared $count SARIF files."
-          echo "count=$count" >> $GITHUB_OUTPUT
-
-      - name: Upload Detekt SARIF Reports
-        if: always() && steps.process_sarif.outputs.count > 0
-        uses: github/codeql-action/upload-sarif@v3
-        continue-on-error: true # Предотвращает падение джобы, если один из модулей пустой
-        with:
-          sarif_file: 'sarif-artifacts/detekt__*__report.sarif'
-          category: 'detekt'
-
-      - name: Upload SpotBugs SARIF Reports
-        if: always() && steps.process_sarif.outputs.count > 0
-        uses: github/codeql-action/upload-sarif@v3
-        continue-on-error: true
-        with:
-          sarif_file: 'sarif-artifacts/spotbugs__*__report.sarif'
-          category: 'spotbugs'
+              # Загружаем напрямую через встроенный в раннер CLI, минуя баги с масками в экшенах
+              gh code-scanning upload-sarif \
+                --sarif-file="$file" \
+                --commit="${{ github.sha }}" \
+                --ref="${{ github.ref }}" \
+                --category="$CATEGORY"
+            fi
+          done
 
   publish:
     runs-on: ubuntu-latest
