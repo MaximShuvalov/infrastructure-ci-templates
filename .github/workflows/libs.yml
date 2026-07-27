@@ -33,7 +33,7 @@ jobs:
       - name: Run Build and All Checks
         run: ./gradlew --no-daemon clean check
 
-      - name: Sanitize SARIF and Generate Upload Manifest
+      - name: Sanitize SARIF
         if: always()
         id: sanitize_sarif
         run: |
@@ -75,7 +75,6 @@ jobs:
             try {
               let data = JSON.parse(fs.readFileSync(file, "utf8"));
 
-              // Очищаем ломающие схему taxonomies
               if (data.runs) {
                 data.runs.forEach(run => {
                   if (run.taxonomies) delete run.taxonomies;
@@ -83,7 +82,6 @@ jobs:
                     delete run.tool.driver.taxonomies;
                   }
           
-                  // Прописываем категорию прямо в SARIF файл. GitHub прочитает её отсюда!
                   if (!run.properties) run.properties = {};
                   run.properties.category = category;
                 });
@@ -107,18 +105,15 @@ jobs:
           }
           '
 
-      - name: Upload SARIF Files Sequentially via REST API
+      - name: Upload SARIF Files
         if: always() && steps.sanitize_sarif.outputs.has_files == 'true'
         run: |
-          # Построчно читаем подготовленный манифест файлов
           while IFS="|" read -r file category; do
             if [ -f "$file" ]; then
               echo "::group::Uploading $category"
           
-              # Архивируем в gzip и кодируем в base64, как требует REST API GitHub
               SARIF_BASE64=$(gzip -c "$file" | base64 -w 0)
           
-              # Отправляем файл. Поле category удалено из ключей gh, так как оно уже внутри SARIF
               gh api \
                 --method POST \
                 -H "Accept: application/vnd.github+json" \
