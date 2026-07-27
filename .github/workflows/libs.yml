@@ -68,27 +68,30 @@ jobs:
             if (!fs.existsSync(file)) return;
 
             const parts = file.replace(/\\/g, "/").replace("./", "").split("/");
-            const module = parts[0] === "build" ? "root" : parts[0];
+            const module = parts === "build" ? "root" : parts;
             const tool = file.includes("detekt") ? "detekt" : "spotbugs";
             const category = `${tool}-${module}`;
 
             try {
               let data = JSON.parse(fs.readFileSync(file, "utf8"));
 
-              // Удаляем невалидные поля taxonomies
+              // Очищаем ломающие схему taxonomies
               if (data.runs) {
                 data.runs.forEach(run => {
                   if (run.taxonomies) delete run.taxonomies;
                   if (run.tool && run.tool.driver && run.tool.driver.taxonomies) {
                     delete run.tool.driver.taxonomies;
                   }
+          
+                  // Прописываем категорию прямо в SARIF файл. GitHub прочитает её отсюда!
+                  if (!run.properties) run.properties = {};
+                  run.properties.category = category;
                 });
               }
 
               const outputName = path.join(targetDir, `${category}.sarif`);
               fs.writeFileSync(outputName, JSON.stringify(data, null, 2));
           
-              // Записываем пару "путь_к_файлу|категория" для последующей загрузки
               manifestLines.push(`${outputName}|${category}`);
               console.log(`Sanitized: ${file} -> ${outputName} (Category: ${category})`);
             } catch (err) {
@@ -104,23 +107,18 @@ jobs:
           }
           '
 
-      - name: Upload SARIF Files Sequentially
+      - name: Upload SARIF Files Sequentially via REST API
         if: always() && steps.sanitize_sarif.outputs.has_files == 'true'
         run: |
-          # Итерируемся по манифесту и загружаем каждый файл индивидуально с уникальной категорией через GitHub Actions API runner
+          # Построчно читаем подготовленный манифест файлов
           while IFS="|" read -r file category; do
             if [ -f "$file" ]; then
-              echo "Uploading $file with category $category..."
+              echo "::group::Uploading $category"
           
-              # Вызываем непосредственно встроенную логику отправки, имитируя экшен,
-              # но избегая конфликтов группировки папок
-              echo "::group::Upload $category"
-          
-              # Запуск встроенного инструмента codeql-action/upload-sarif для конкретного файла
-              # Мы используем curl/gh в безопасном режиме, так как экшен v4 не может динамически вызываться в цикле bash.
-              # Чтобы не использовать отсутствующий "gh code-scanning", шлем стандартный POST-запрос:
+              # Архивируем в gzip и кодируем в base64, как требует REST API GitHub
               SARIF_BASE64=$(gzip -c "$file" | base64 -w 0)
           
+              # Отправляем файл. Поле category удалено из ключей gh, так как оно уже внутри SARIF
               gh api \
                 --method POST \
                 -H "Accept: application/vnd.github+json" \
@@ -129,7 +127,6 @@ jobs:
                 -f commit_sha="${{ github.sha }}" \
                 -f ref="${{ github.ref }}" \
                 -f sarif="$SARIF_BASE64" \
-                -f category="$category" \
                 -f tool_name="${category%%-*}"
           
               echo "::endgroup::"
