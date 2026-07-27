@@ -44,20 +44,16 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.sha }}
         run: |
-          echo "🔍 Debug: LLM_API_KEY starts with: ${LLM_API_KEY:0:10}..."
-          echo "🔍 Debug: PR_NUMBER=$PR_NUMBER, BASE_SHA=$BASE_SHA, HEAD_SHA=$HEAD_SHA"
+          echo "Debug: LLM_API_KEY starts with: ${LLM_API_KEY:0:10}..."
 
           DIFF_STAT=$(git diff --stat $BASE_SHA...$HEAD_SHA)
           COMMITS=$(git log --oneline --no-merges $BASE_SHA...$HEAD_SHA)
-
-          echo "🔍 Debug: DIFF_STAT length: ${#DIFF_STAT}"
-          echo "🔍 Debug: COMMITS: $COMMITS"
 
           jq -n \
             --arg diff "$DIFF_STAT" \
             --arg commits "$COMMITS" \
             '{
-              model: "qwen/qwen-2.5-coder-32b-instruct:free",
+              model: "qwen/qwen-2.5-7b-instruct:free",
               messages: [
                 {
                   role: "system",
@@ -71,38 +67,45 @@ jobs:
               temperature: 0.2
             }' > payload.json
 
-          echo "🔍 Debug: payload.json:"
-          cat payload.json
+          # Список моделей для fallback (от лучшей к худшей)
+          MODELS=("qwen/qwen-2.5-7b-instruct:free" "meta-llama/llama-3.1-8b-instruct:free" "deepseek/deepseek-chat:free")
 
-          RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" https://openrouter.ai/api/v1/chat/completions \
-            -H "Authorization: Bearer $LLM_API_KEY" \
-            -H "Content-Type: application/json" \
-            -H "HTTP-Referer: https://github.com/${{ github.repository }}" \
-            -H "X-Title: GitHub PR Summary" \
-            -d @payload.json)
+          SUMMARY=""
+          for MODEL in "${MODELS[@]}"; do
+            echo "Trying model: $MODEL"
 
-          echo "🔍 Debug: Raw API response:"
-          echo "$RESPONSE"
+            # Обновляем модель в payload
+            jq --arg model "$MODEL" '.model = $model' payload.json > payload_tmp.json
+            mv payload_tmp.json payload.json
 
-          HTTP_CODE=$(echo "$RESPONSE" | grep -o 'HTTP_STATUS:[0-9]*' | cut -d: -f2)
-          BODY=$(echo "$RESPONSE" | sed '/HTTP_STATUS:/d')
+            RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" https://openrouter.ai/api/v1/chat/completions \
+              -H "Authorization: Bearer $LLM_API_KEY" \
+              -H "Content-Type: application/json" \
+              -H "HTTP-Referer: https://github.com/${{ github.repository }}" \
+              -H "X-Title: GitHub PR Summary" \
+              -d @payload.json)
 
-          echo "🔍 Debug: HTTP status: $HTTP_CODE"
+            HTTP_CODE=$(echo "$RESPONSE" | grep -o 'HTTP_STATUS:[0-9]*' | cut -d: -f2)
+            BODY=$(echo "$RESPONSE" | sed '/HTTP_STATUS:/d')
 
-          if [ "$HTTP_CODE" != "200" ]; then
-            echo "❌ API returned error: $BODY"
-            exit 1
-          fi
-
-          SUMMARY=$(echo "$BODY" | jq -r '.choices[0].message.content // empty')
+            if [ "$HTTP_CODE" = "200" ]; then
+              SUMMARY=$(echo "$BODY" | jq -r '.choices[0].message.content // empty')
+              if [ -n "$SUMMARY" ]; then
+                echo "Success with model: $MODEL"
+                break
+              fi
+            else
+              echo "Model $MODEL failed with HTTP $HTTP_CODE"
+              echo "$BODY" | jq -r '.error.message // "Unknown error"'
+            fi
+          done
 
           if [ -z "$SUMMARY" ]; then
-            echo "❌ Empty response from API"
-            echo "$BODY" | jq .
+            echo "All models failed. Cannot generate summary."
             exit 1
           fi
 
-          echo "✅ Generated summary:"
+          echo "Generated summary:"
           echo "$SUMMARY"
 
           CURRENT_BODY=$(gh pr view $PR_NUMBER --json body -q '.body')
@@ -113,6 +116,6 @@ jobs:
             gh pr edit $PR_NUMBER --body "${CURRENT_BODY}
 
           ---
-          ### AI Summary (Qwen Coder)
+          ### AI Summary
           ${SUMMARY}"
           fi
