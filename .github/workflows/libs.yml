@@ -8,9 +8,17 @@ on:
         required: false
         type: string
         default: '21'
+      enable-ai-summary:
+        description: 'Enable AI PR Summary generation via Qwen Coder'
+        required: false
+        type: boolean
+        default: false
     secrets:
       PUBLISH_TOKEN:
         required: true
+      LLM_API_KEY:
+        description: 'API key for OpenRouter (required only if enable-ai-summary is true)'
+        required: false
 
 jobs:
   verify:
@@ -157,3 +165,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}
+
+  ai-summary:
+    if: inputs.enable-ai-summary == true && github.event_name == 'pull_request'
+    uses: ./.github/workflows/pr-summary.yml
+    secrets:
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
