@@ -33,40 +33,82 @@ jobs:
       - name: Run Build and All Checks
         run: ./gradlew --no-daemon clean check
 
-      - name: Collect and Rename SARIF Files
-        id: collect_sarif
+      - name: Sanitize and Collect SARIF Files with Node.js
         if: always()
+        id: collect_sarif
         run: |
-          # Создаем чистую директорию для результатов
-          mkdir -p sarif-results
-          
-          count=0
-          
-          # Находим все файлы и копируем их с плоскими уникальными именами
-          while read -r file; do
-            if [ -f "$file" ]; then
-              # Извлекаем имя модуля
-              MODULE=$(echo "$file" | awk -F'/build/reports/' '{print $1}' | sed 's|^\./||' | tr '/' '-')
-              if [ -z "$MODULE" ]; then MODULE="root"; fi
-          
-              # Определяем инструмент
-              TOOL="spotbugs"
-              if [[ "$file" == *"detekt"* ]]; then TOOL="detekt"; fi
-          
-              # Формируем уникальное имя файла, чтобы избежать перезаписи в одной папке
-              cp "$file" "sarif-results/${MODULE}-${TOOL}.sarif"
-              count=$((count+1))
-            fi
-          done < <(find . -type f \( -path "*/build/reports/detekt/detekt.sarif" -o -path "*/build/reports/spotbugs/main.sarif" \))
-          
-          echo "Prepared $count SARIF files for upload."
-          echo "count=$count" >> $GITHUB_OUTPUT
+          node -e '
+          const fs = require("fs");
+          const path = require("path");
 
-      - name: Upload SARIF Directory to GitHub Code Scanning
+          // Функция рекурсивного поиска файлов
+          function findFiles(dir, pattern, fileList = []) {
+            const files = fs.readdirSync(dir);
+            files.forEach(file => {
+              const filePath = path.join(dir, file);
+              const stat = fs.statSync(filePath);
+              if (stat.isDirectory()) {
+                findFiles(filePath, pattern, fileList);
+              } else if (filePath.replace(/\\/g, "/").includes(pattern)) {
+                fileList.push(filePath);
+              }
+            });
+            return fileList;
+          }
+
+          const targetDir = "sarif-results";
+          if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir);
+
+          // Ищем отчеты detekt и spotbugs
+          const detektFiles = findFiles(".", "build/reports/detekt/detekt.sarif");
+          const spotbugsFiles = findFiles(".", "build/reports/spotbugs/main.sarif");
+          const allFiles = [...detektFiles, ...spotbugsFiles];
+
+          let count = 0;
+
+          allFiles.forEach(file => {
+            if (!fs.existsSync(file)) return;
+
+            // Извлекаем название Gradle-модуля из пути
+            const parts = file.replace(/\\/g, "/").replace("./", "").split("/");
+            const module = parts[0] === "build" ? "root" : parts[0];
+            const tool = file.includes("detekt") ? "detekt" : "spotbugs";
+
+            try {
+              let data = JSON.parse(fs.readFileSync(file, "utf8"));
+
+              // Санитизация: удаляем невалидные поля taxonomies, ломающие схему GitHub
+              if (data.runs) {
+                data.runs.forEach(run => {
+                  if (run.taxonomies) delete run.taxonomies;
+                  if (run.tool && run.tool.driver && run.tool.driver.taxonomies) {
+                    delete run.tool.driver.taxonomies;
+                  }
+          
+                  // Прописываем уникальную категорию внутри самого SARIF-файла
+                  if (!run.properties) run.properties = {};
+                  run.properties.category = `${tool}-${module}`;
+                });
+              }
+
+              // Записываем очищенный файл с плоским именем
+              const outputName = path.join(targetDir, `${module}-${tool}.sarif`);
+              fs.writeFileSync(outputName, JSON.stringify(data, null, 2));
+              count++;
+              console.log(`Successfully sanitized and copied: ${file} -> ${outputName}`);
+            } catch (err) {
+              console.error(`Failed to process ${file}:`, err.message);
+            }
+          });
+
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `count=${count}\n`);
+          '
+
+      - name: Upload Cleaned SARIF Directory to GitHub Code Scanning
         if: always() && steps.collect_sarif.outputs.count > 0
         uses: github/codeql-action/upload-sarif@v4
         with:
-          # Передаем путь к директории, а не маску файла. Это предотвратит ошибку Path does not exist
+          # Загружаем всю папку с гарантированно валидными SARIF файлами
           sarif_file: 'sarif-results'
 
   publish:
