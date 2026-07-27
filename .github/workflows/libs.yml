@@ -168,6 +168,6 @@ jobs:
 
   ai-summary:
     if: inputs.enable-ai-summary == true && github.event_name == 'pull_request'
-    uses: MaximShuvalov/infrastructure-ci-templates/.github/workflows/pr-summary.yml@master
+    uses: MaximShuvalov/infrastructure-ci-templates/.github/workflows/pr_summary.yml@master
     secrets:
       LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
