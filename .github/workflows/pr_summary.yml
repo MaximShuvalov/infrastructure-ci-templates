@@ -43,51 +43,76 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.sha }}
-          MODEL: ${{ inputs.model }}
-          TEMP: ${{ inputs.temperature }}
-          EXTRA_INSTRUCTIONS: ${{ inputs.extra_instructions }}
         run: |
+          echo "🔍 Debug: LLM_API_KEY starts with: ${LLM_API_KEY:0:10}..."
+          echo "🔍 Debug: PR_NUMBER=$PR_NUMBER, BASE_SHA=$BASE_SHA, HEAD_SHA=$HEAD_SHA"
+
           DIFF_STAT=$(git diff --stat $BASE_SHA...$HEAD_SHA)
           COMMITS=$(git log --oneline --no-merges $BASE_SHA...$HEAD_SHA)
 
+          echo "🔍 Debug: DIFF_STAT length: ${#DIFF_STAT}"
+          echo "🔍 Debug: COMMITS: $COMMITS"
+
           jq -n \
-            --arg model "$MODEL" \
-            --arg temp "$TEMP" \
             --arg diff "$DIFF_STAT" \
             --arg commits "$COMMITS" \
-            --arg extra "$EXTRA_INSTRUCTIONS" \
             '{
-              model: $model,
+              model: "qwen/qwen-2.5-coder-32b-instruct:free",
               messages: [
                 {
                   role: "system",
-                  content: ("Ты — Senior разработчик и архитектор. Пиши краткие, сухие и технические описания для Pull Request на русском языке. Без воды, вступлений и общих фраз. " + $extra)
+                  content: "Ты — Senior разработчик. Пиши краткие, сухие и технические описания для Pull Request на русском языке. Без воды и общих фраз."
                 },
                 {
                   role: "user",
-                  content: ("Напиши описание для PR на русском.\n\nИзменения в файлах:\n" + $diff + "\n\nИстория коммитов:\n" + $commits + "\n\nФормат ответа (Markdown):\n### Описание изменений\n[Краткая суть]\n\n### Ключевые изменения\n- [Пункт 1]\n- [Пункт 2]\n\n### Breaking Changes\n[Нет / Описание]")
+                  content: ("Напиши описание для PR.\n\nИзменения в файлах:\n" + $diff + "\n\nИстория коммитов:\n" + $commits + "\n\nФормат (Markdown):\n### Описание изменений\n[Краткая суть]\n\n### Ключевые изменения\n- [Пункт 1]\n- [Пункт 2]\n\n### Breaking Changes\n[Нет / Описание]")
                 }
               ],
-              temperature: ($temp | tonumber)
+              temperature: 0.2
             }' > payload.json
 
-          RESPONSE=$(curl -s https://openrouter.ai/api/v1/chat/completions \
+          echo "🔍 Debug: payload.json:"
+          cat payload.json
+
+          RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" https://openrouter.ai/api/v1/chat/completions \
             -H "Authorization: Bearer $LLM_API_KEY" \
             -H "Content-Type: application/json" \
             -H "HTTP-Referer: https://github.com/${{ github.repository }}" \
             -H "X-Title: GitHub PR Summary" \
             -d @payload.json)
 
-          SUMMARY=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // "Не удалось сгенерировать описание"')
+          echo "🔍 Debug: Raw API response:"
+          echo "$RESPONSE"
+
+          HTTP_CODE=$(echo "$RESPONSE" | grep -o 'HTTP_STATUS:[0-9]*' | cut -d: -f2)
+          BODY=$(echo "$RESPONSE" | sed '/HTTP_STATUS:/d')
+
+          echo "🔍 Debug: HTTP status: $HTTP_CODE"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "❌ API returned error: $BODY"
+            exit 1
+          fi
+
+          SUMMARY=$(echo "$BODY" | jq -r '.choices[0].message.content // empty')
+
+          if [ -z "$SUMMARY" ]; then
+            echo "❌ Empty response from API"
+            echo "$BODY" | jq .
+            exit 1
+          fi
+
+          echo "✅ Generated summary:"
+          echo "$SUMMARY"
 
           CURRENT_BODY=$(gh pr view $PR_NUMBER --json body -q '.body')
-          
+
           if [[ "$CURRENT_BODY" == "null" || -z "$CURRENT_BODY" ]]; then
             gh pr edit $PR_NUMBER --body "$SUMMARY"
           else
             gh pr edit $PR_NUMBER --body "${CURRENT_BODY}
 
           ---
-          ### AI Summary
+          ### AI Summary (Qwen Coder)
           ${SUMMARY}"
           fi
