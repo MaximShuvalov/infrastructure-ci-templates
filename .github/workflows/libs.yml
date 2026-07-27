@@ -33,15 +33,14 @@ jobs:
       - name: Run Build and All Checks
         run: ./gradlew --no-daemon clean check
 
-      - name: Sanitize and Collect SARIF Files with Node.js
+      - name: Sanitize SARIF and Generate Upload Manifest
         if: always()
-        id: collect_sarif
+        id: sanitize_sarif
         run: |
           node -e '
           const fs = require("fs");
           const path = require("path");
 
-          // Функция рекурсивного поиска файлов
           function findFiles(dir, pattern, fileList = []) {
             const files = fs.readdirSync(dir);
             files.forEach(file => {
@@ -56,60 +55,88 @@ jobs:
             return fileList;
           }
 
-          const targetDir = "sarif-results";
+          const targetDir = "sarif-cleaned";
           if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir);
 
-          // Ищем отчеты detekt и spotbugs
           const detektFiles = findFiles(".", "build/reports/detekt/detekt.sarif");
           const spotbugsFiles = findFiles(".", "build/reports/spotbugs/main.sarif");
           const allFiles = [...detektFiles, ...spotbugsFiles];
 
-          let count = 0;
+          let manifestLines = [];
 
           allFiles.forEach(file => {
             if (!fs.existsSync(file)) return;
 
-            // Извлекаем название Gradle-модуля из пути
             const parts = file.replace(/\\/g, "/").replace("./", "").split("/");
             const module = parts[0] === "build" ? "root" : parts[0];
             const tool = file.includes("detekt") ? "detekt" : "spotbugs";
+            const category = `${tool}-${module}`;
 
             try {
               let data = JSON.parse(fs.readFileSync(file, "utf8"));
 
-              // Санитизация: удаляем невалидные поля taxonomies, ломающие схему GitHub
+              // Удаляем невалидные поля taxonomies
               if (data.runs) {
                 data.runs.forEach(run => {
                   if (run.taxonomies) delete run.taxonomies;
                   if (run.tool && run.tool.driver && run.tool.driver.taxonomies) {
                     delete run.tool.driver.taxonomies;
                   }
-          
-                  // Прописываем уникальную категорию внутри самого SARIF-файла
-                  if (!run.properties) run.properties = {};
-                  run.properties.category = `${tool}-${module}`;
                 });
               }
 
-              // Записываем очищенный файл с плоским именем
-              const outputName = path.join(targetDir, `${module}-${tool}.sarif`);
+              const outputName = path.join(targetDir, `${category}.sarif`);
               fs.writeFileSync(outputName, JSON.stringify(data, null, 2));
-              count++;
-              console.log(`Successfully sanitized and copied: ${file} -> ${outputName}`);
+          
+              // Записываем пару "путь_к_файлу|категория" для последующей загрузки
+              manifestLines.push(`${outputName}|${category}`);
+              console.log(`Sanitized: ${file} -> ${outputName} (Category: ${category})`);
             } catch (err) {
               console.error(`Failed to process ${file}:`, err.message);
             }
           });
 
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, `count=${count}\n`);
+          if (manifestLines.length > 0) {
+            fs.writeFileSync("sarif_manifest.txt", manifestLines.join("\n"));
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, "has_files=true\n");
+          } else {
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, "has_files=false\n");
+          }
           '
 
-      - name: Upload Cleaned SARIF Directory to GitHub Code Scanning
-        if: always() && steps.collect_sarif.outputs.count > 0
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          # Загружаем всю папку с гарантированно валидными SARIF файлами
-          sarif_file: 'sarif-results'
+      - name: Upload SARIF Files Sequentially
+        if: always() && steps.sanitize_sarif.outputs.has_files == 'true'
+        run: |
+          # Итерируемся по манифесту и загружаем каждый файл индивидуально с уникальной категорией через GitHub Actions API runner
+          while IFS="|" read -r file category; do
+            if [ -f "$file" ]; then
+              echo "Uploading $file with category $category..."
+          
+              # Вызываем непосредственно встроенную логику отправки, имитируя экшен,
+              # но избегая конфликтов группировки папок
+              echo "::group::Upload $category"
+          
+              # Запуск встроенного инструмента codeql-action/upload-sarif для конкретного файла
+              # Мы используем curl/gh в безопасном режиме, так как экшен v4 не может динамически вызываться в цикле bash.
+              # Чтобы не использовать отсутствующий "gh code-scanning", шлем стандартный POST-запрос:
+              SARIF_BASE64=$(gzip -c "$file" | base64 -w 0)
+          
+              gh api \
+                --method POST \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                /repos/${{ github.repository }}/code-scanning/sarifs \
+                -f commit_sha="${{ github.sha }}" \
+                -f ref="${{ github.ref }}" \
+                -f sarif="$SARIF_BASE64" \
+                -f category="$category" \
+                -f tool_name="${category%%-*}"
+          
+              echo "::endgroup::"
+            fi
+          done < sarif_manifest.txt
+        env:
+          GH_TOKEN: ${{ github.token }}
 
   publish:
     runs-on: ubuntu-latest
