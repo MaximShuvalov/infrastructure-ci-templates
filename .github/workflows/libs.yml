@@ -158,7 +158,7 @@ jobs:
           VERSION="${{ github.ref_name }}"
           ./gradlew --no-daemon publish \
             -Pversion="${VERSION#v}" \
-            -PgithubMavenRepositoryUrl="https://github.com{{ github.repository }}"
+            -PgithubMavenRepositoryUrl="https://maven.pkg.github.com/${{ github.repository }}"
         env:
           GITHUB_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}
