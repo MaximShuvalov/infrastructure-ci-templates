@@ -53,7 +53,7 @@ jobs:
             --arg diff "$DIFF_STAT" \
             --arg commits "$COMMITS" \
             '{
-              model: "qwen/qwen-2.5-7b-instruct:free",
+              model: "openai/gpt-4o-mini:free",
               messages: [
                 {
                   role: "system",
@@ -67,41 +67,29 @@ jobs:
               temperature: 0.2
             }' > payload.json
 
-          # Список моделей для fallback (от лучшей к худшей)
-          MODELS=("qwen/qwen-2.5-7b-instruct:free" "meta-llama/llama-3.1-8b-instruct:free" "deepseek/deepseek-chat:free")
+          RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" https://openrouter.ai/api/v1/chat/completions \
+            -H "Authorization: Bearer $LLM_API_KEY" \
+            -H "Content-Type: application/json" \
+            -H "HTTP-Referer: https://github.com/${{ github.repository }}" \
+            -H "X-Title: GitHub PR Summary" \
+            -d @payload.json)
 
-          SUMMARY=""
-          for MODEL in "${MODELS[@]}"; do
-            echo "Trying model: $MODEL"
+          HTTP_CODE=$(echo "$RESPONSE" | grep -o 'HTTP_STATUS:[0-9]*' | cut -d: -f2)
+          BODY=$(echo "$RESPONSE" | sed '/HTTP_STATUS:/d')
 
-            # Обновляем модель в payload
-            jq --arg model "$MODEL" '.model = $model' payload.json > payload_tmp.json
-            mv payload_tmp.json payload.json
+          echo "HTTP status: $HTTP_CODE"
 
-            RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" https://openrouter.ai/api/v1/chat/completions \
-              -H "Authorization: Bearer $LLM_API_KEY" \
-              -H "Content-Type: application/json" \
-              -H "HTTP-Referer: https://github.com/${{ github.repository }}" \
-              -H "X-Title: GitHub PR Summary" \
-              -d @payload.json)
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "API returned error:"
+            echo "$BODY" | jq .
+            exit 1
+          fi
 
-            HTTP_CODE=$(echo "$RESPONSE" | grep -o 'HTTP_STATUS:[0-9]*' | cut -d: -f2)
-            BODY=$(echo "$RESPONSE" | sed '/HTTP_STATUS:/d')
-
-            if [ "$HTTP_CODE" = "200" ]; then
-              SUMMARY=$(echo "$BODY" | jq -r '.choices[0].message.content // empty')
-              if [ -n "$SUMMARY" ]; then
-                echo "Success with model: $MODEL"
-                break
-              fi
-            else
-              echo "Model $MODEL failed with HTTP $HTTP_CODE"
-              echo "$BODY" | jq -r '.error.message // "Unknown error"'
-            fi
-          done
+          SUMMARY=$(echo "$BODY" | jq -r '.choices[0].message.content // empty')
 
           if [ -z "$SUMMARY" ]; then
-            echo "All models failed. Cannot generate summary."
+            echo "Empty response from API"
+            echo "$BODY" | jq .
             exit 1
           fi
 
